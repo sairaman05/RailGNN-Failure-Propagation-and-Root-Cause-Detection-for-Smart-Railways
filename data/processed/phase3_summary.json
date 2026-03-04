@@ -1,0 +1,38 @@
+{
+  "records_processed": 10000,
+  "elapsed_seconds": 0.42,
+  "throughput_rec_per_sec": 24032.6,
+  "components_tracked": 20,
+  "component_ids": [
+    "BR1",
+    "BR2",
+    "BR3",
+    "SG1",
+    "SG2",
+    "SG3",
+    "SW1",
+    "SW2",
+    "SW3",
+    "SW4",
+    "T01",
+    "T02",
+    "T03",
+    "T04",
+    "T05",
+    "T06",
+    "T07",
+    "T08",
+    "T09",
+    "T10"
+  ],
+  "alert_summary": {
+    "total_alerts": 0,
+    "by_level": {},
+    "components_alerted": 0
+  },
+  "feature_engine_stats": {
+    "total_processed": 10000,
+    "components_tracked": 20,
+    "window_size": 20
+  }
+}

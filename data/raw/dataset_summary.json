@@ -1,0 +1,47 @@
+{
+  "total_records": 100000,
+  "unique_components": 20,
+  "time_range": {
+    "start": "2024-01-01 00:00:00",
+    "end": "2024-01-02 17:39:30"
+  },
+  "sensor_stats": {
+    "vibration": {
+      "min": 0.1,
+      "max": 1.4267,
+      "mean": 0.49928911400000003,
+      "std": 0.18287190382403246
+    },
+    "temperature": {
+      "min": 25.75,
+      "max": 68.07,
+      "mean": 38.90662390000001,
+      "std": 5.450231962699736
+    },
+    "load": {
+      "min": 0.681,
+      "max": 1.8499,
+      "mean": 1.0340547270000002,
+      "std": 0.14934614912939057
+    },
+    "electrical_current": {
+      "min": 0.2643,
+      "max": 1.0737,
+      "mean": 0.544905587,
+      "std": 0.14295953489841576
+    }
+  },
+  "risk_distribution": {
+    "0": 63370,
+    "1": 29080,
+    "2": 7506,
+    "3": 44
+  },
+  "fault_distribution": {
+    "none": 95461,
+    "propagated": 2175,
+    "mechanical_wear": 1000,
+    "overheating": 750,
+    "electrical_fault": 614
+  }
+}
