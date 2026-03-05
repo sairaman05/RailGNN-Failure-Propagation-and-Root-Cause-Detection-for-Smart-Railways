@@ -1,291 +1,255 @@
 """
-Railway Sensor Data Simulator.
-Generates 100,000 realistic sensor records with degradation patterns.
+Phase 1 — Railway Sensor Data Generator (final)
+
+Key design decisions:
+  - Failure events scale with --steps so any dataset size works
+  - ~35% of steps have at least one component degrading
+  - risk_score derived from degradation STATE + Gaussian noise
+    (NOT from sensor threshold formula — prevents data leakage)
+  - Multiple simultaneous failures to simulate realistic cascades
+  - Lower risk thresholds (low>=0.15, med>=0.35, high>=0.65) for
+    a more balanced label distribution
+
+Usage:
+  python -m src.data_generation.sensor_simulator                 # 20000 steps
+  python -m src.data_generation.sensor_simulator --steps 20000
 """
 
-import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
-import sys
-import os
-import json
+import csv, math, random, argparse
+from pathlib import Path
 
-from .config import (
-    SensorConfig, 
-    FaultType,
-    DEFAULT_SENSOR_CONFIG
-)
-from .degradation_patterns import DegradationPatternGenerator
+random.seed(42)
+
+COMPONENT_ORDER = [
+    "T01","T02","T03","T04","T05","T06","T07","T08","T09","T10",
+    "SW1","SW2","SW3","SW4","SG1","SG2","SG3","BR1","BR2","BR3",
+]
+COMPONENT_TYPES = {
+    **{f"T0{i}":"track" for i in range(1,10)}, "T10":"track",
+    **{f"SW{i}":"switch" for i in range(1,5)},
+    **{f"SG{i}":"signal" for i in range(1,4)},
+    **{f"BR{i}":"bridge" for i in range(1,4)},
+}
+BASELINES = {
+    "track":  {"vibration":(0.35,0.04),"temperature":(42.0,2.0),"load":(65.0,4.0),"current":(14.5,0.6)},
+    "switch": {"vibration":(0.55,0.06),"temperature":(48.0,2.5),"load":(45.0,3.0),"current":(18.5,0.8)},
+    "signal": {"vibration":(0.15,0.02),"temperature":(35.0,1.5),"load":(20.0,2.0),"current":(8.5,0.4)},
+    "bridge": {"vibration":(0.25,0.03),"temperature":(55.0,3.0),"load":(85.0,5.0),"current":(22.0,1.0)},
+}
+SENSORS = ["vibration","temperature","load","current"]
+FIELDNAMES = [
+    "record_id","time_step","component_id","component_type",
+    "vibration","temperature","load","current",
+    "vibration_delta","temperature_delta",
+    "risk_score","health_index","risk_level",
+    "failure_mode","is_anomaly","is_degrading","degradation_state",
+]
+
+# Risk thresholds — lower than typical so propagation nodes get labelled too
+THRESH_HIGH   = 0.65
+THRESH_MEDIUM = 0.35
+THRESH_LOW    = 0.15
 
 
-class RailwaySensorSimulator:
+def _make_events(S: int) -> list:
     """
-    Generates realistic railway sensor data with:
-    - Normal operating conditions
-    - Gradual degradation patterns
-    - Failure propagation across connected components
-    - Realistic noise and variations
+    Build failure event schedule scaled to S total steps.
+    Covers ~40% of all steps with some form of degradation.
+    s() scales a base-5000 step value to actual S.
     """
-    
-    def __init__(self, config: Optional[SensorConfig] = None):
-        self.config = config or DEFAULT_SENSOR_CONFIG
-        self.rng = np.random.default_rng(self.config.random_seed)
-        
-        self.degradation_generator = DegradationPatternGenerator(
-            sensor_ranges=self.config.sensor_ranges,
-            random_seed=self.config.random_seed
-        )
-        
-        self.components = list(self.config.component_config.components.keys())
-        self.num_components = len(self.components)
-        
-        print(f"Initialized simulator with {self.num_components} components")
-        print(f"Components: {self.components}")
-    
-    def _generate_base_value(self, sensor_type: str, component_id: str) -> float:
-        """Generate a base sensor value within normal range"""
-        ranges = self.config.sensor_ranges
-        multipliers = self.config.component_config.baseline_multipliers
-        
-        range_map = {
-            "vibration": ranges.vibration_normal,
-            "temperature": ranges.temperature_normal,
-            "load": ranges.load_normal,
-            "current": ranges.current_normal
-        }
-        
-        low, high = range_map[sensor_type]
-        base = self.rng.uniform(low, high)
-        
-        if component_id in multipliers:
-            mult = multipliers[component_id].get(sensor_type, 1.0)
-            base *= mult
-        
-        return base
-    
-    def _add_noise(self, value: float, sensor_type: str) -> float:
-        """Add realistic noise to sensor value"""
-        noise_scales = {
-            "vibration": 0.05,
-            "temperature": 1.0,
-            "load": 0.03,
-            "current": 0.02
-        }
-        scale = noise_scales.get(sensor_type, 0.05)
-        noise = self.rng.normal(0, scale * self.config.noise_std * 10)
-        return value + noise
-    
-    def _add_temporal_variation(self, value: float, row_idx: int, sensor_type: str) -> float:
-        """Add time-based variations (daily cycles, etc.)"""
-        if sensor_type == "temperature":
-            hour = (row_idx * self.config.time_interval_seconds / 3600) % 24
-            daily_variation = 3 * np.sin(2 * np.pi * hour / 24)
-            value += daily_variation
-        elif sensor_type == "load":
-            hour = (row_idx * self.config.time_interval_seconds / 3600) % 24
-            if 6 <= hour <= 9 or 16 <= hour <= 19:
-                value *= 1.1
-        return value
-    
-    def generate_record(self, row_idx: int, component_id: str, timestamp: datetime) -> Dict:
-        """Generate a single sensor record"""
-        
-        vibration = self._generate_base_value("vibration", component_id)
-        temperature = self._generate_base_value("temperature", component_id)
-        load = self._generate_base_value("load", component_id)
-        current = self._generate_base_value("current", component_id)
-        
-        vibration = self._add_temporal_variation(vibration, row_idx, "vibration")
-        temperature = self._add_temporal_variation(temperature, row_idx, "temperature")
-        load = self._add_temporal_variation(load, row_idx, "load")
-        current = self._add_temporal_variation(current, row_idx, "current")
-        
-        fault_type = FaultType.NONE
-        
-        vib_mod, vib_fault = self.degradation_generator.get_sensor_modifier(component_id, "vibration", row_idx)
-        temp_mod, temp_fault = self.degradation_generator.get_sensor_modifier(component_id, "temperature", row_idx)
-        load_mod, load_fault = self.degradation_generator.get_sensor_modifier(component_id, "load", row_idx)
-        curr_mod, curr_fault = self.degradation_generator.get_sensor_modifier(component_id, "current", row_idx)
-        
-        vibration += vib_mod
-        temperature += temp_mod
-        load += load_mod
-        current += curr_mod
-        
-        for ft in [vib_fault, temp_fault, load_fault, curr_fault]:
-            if ft != FaultType.NONE:
-                fault_type = ft
-                break
-        
-        vibration = self._add_noise(vibration, "vibration")
-        temperature = self._add_noise(temperature, "temperature")
-        load = self._add_noise(load, "load")
-        current = self._add_noise(current, "current")
-        
-        vibration = max(0.1, vibration)
-        temperature = max(20.0, temperature)
-        load = max(0.5, load)
-        current = max(0.1, current)
-        
-        risk_label = self.degradation_generator.calculate_risk_label(vibration, temperature, load, current)
-        
-        comp_type, comp_name = self.config.component_config.components[component_id]
-        
-        return {
-            "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-            "component_id": component_id,
-            "component_name": comp_name,
-            "component_type": comp_type.value,
-            "vibration": round(vibration, 4),
-            "temperature": round(temperature, 2),
-            "load": round(load, 4),
-            "electrical_current": round(current, 4),
-            "risk_label": risk_label,
-            "fault_type": fault_type.value
-        }
-    
-    def generate_dataset(self, output_path: Optional[str] = None, show_progress: bool = True) -> pd.DataFrame:
-        """Generate the complete dataset with 100,000 records."""
-        records = []
-        records_per_component = self.config.total_records // self.num_components
-        
-        start_time = datetime.strptime(self.config.start_timestamp, "%Y-%m-%d %H:%M:%S")
-        
-        print(f"\nGenerating {self.config.total_records} sensor records...")
-        print(f"Records per component: {records_per_component}")
-        print(f"Time span: {records_per_component * self.config.time_interval_seconds / 3600:.1f} hours")
-        
-        iterator = range(records_per_component)
-        progress_interval = max(1, records_per_component // 20)
-        
-        for time_idx in iterator:
-            if show_progress and time_idx % progress_interval == 0:
-                pct = (time_idx / records_per_component) * 100
-                sys.stdout.write(f"\rProgress: {pct:.0f}%")
-                sys.stdout.flush()
-            
-            timestamp = start_time + timedelta(seconds=time_idx * self.config.time_interval_seconds)
-            
-            for comp_idx, component_id in enumerate(self.components):
-                row_idx = time_idx * self.num_components + comp_idx
-                record = self.generate_record(row_idx, component_id, timestamp)
-                records.append(record)
-        
-        if show_progress:
-            print("\rProgress: 100%")
-        
-        df = pd.DataFrame(records)
-        df = df.sort_values(["timestamp", "component_id"]).reset_index(drop=True)
-        df["record_id"] = range(len(df))
-        
-        columns = [
-            "record_id", "timestamp", "component_id", "component_name",
-            "component_type", "vibration", "temperature", "load",
-            "electrical_current", "risk_label", "fault_type"
-        ]
-        df = df[columns]
-        
-        print(f"\nGenerated {len(df)} records")
-        
-        if output_path:
-            df.to_csv(output_path, index=False)
-            print(f"Saved to: {output_path}")
-        
-        return df
-    
-    def generate_summary(self, df: pd.DataFrame) -> Dict:
-        """Generate summary statistics for the dataset"""
-        summary = {
-            "total_records": len(df),
-            "unique_components": int(df["component_id"].nunique()),
-            "time_range": {
-                "start": str(df["timestamp"].min()),
-                "end": str(df["timestamp"].max())
-            },
-            "sensor_stats": {
-                "vibration": {
-                    "min": float(df["vibration"].min()),
-                    "max": float(df["vibration"].max()),
-                    "mean": float(df["vibration"].mean()),
-                    "std": float(df["vibration"].std())
-                },
-                "temperature": {
-                    "min": float(df["temperature"].min()),
-                    "max": float(df["temperature"].max()),
-                    "mean": float(df["temperature"].mean()),
-                    "std": float(df["temperature"].std())
-                },
-                "load": {
-                    "min": float(df["load"].min()),
-                    "max": float(df["load"].max()),
-                    "mean": float(df["load"].mean()),
-                    "std": float(df["load"].std())
-                },
-                "electrical_current": {
-                    "min": float(df["electrical_current"].min()),
-                    "max": float(df["electrical_current"].max()),
-                    "mean": float(df["electrical_current"].mean()),
-                    "std": float(df["electrical_current"].std())
-                }
-            },
-            "risk_distribution": {int(k): int(v) for k, v in df["risk_label"].value_counts().to_dict().items()},
-            "fault_distribution": {str(k): int(v) for k, v in df["fault_type"].value_counts().to_dict().items()}
-        }
-        return summary
-    
-    def print_summary(self, df: pd.DataFrame):
-        """Print formatted summary of the dataset"""
-        summary = self.generate_summary(df)
-        
-        print("\n" + "="*60)
-        print("DATASET SUMMARY")
-        print("="*60)
-        
-        print(f"\nTotal Records: {summary['total_records']:,}")
-        print(f"Unique Components: {summary['unique_components']}")
-        print(f"Time Range: {summary['time_range']['start']} to {summary['time_range']['end']}")
-        
-        print("\n--- Sensor Statistics ---")
-        for sensor, stats in summary["sensor_stats"].items():
-            print(f"\n{sensor.upper()}:")
-            print(f"  Min: {stats['min']:.4f}, Max: {stats['max']:.4f}")
-            print(f"  Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}")
-        
-        print("\n--- Risk Distribution ---")
-        risk_names = {0: "NORMAL", 1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "CRITICAL"}
-        for risk, count in sorted(summary["risk_distribution"].items()):
-            pct = count / summary["total_records"] * 100
-            print(f"  {risk_names.get(risk, risk)}: {count:,} ({pct:.2f}%)")
-        
-        print("\n--- Fault Distribution ---")
-        for fault, count in summary["fault_distribution"].items():
-            pct = count / summary["total_records"] * 100
-            print(f"  {fault}: {count:,} ({pct:.2f}%)")
-        
-        print("\n" + "="*60)
+    def s(v): return int(v * S / 5000)
+    return [
+        # ── Cluster 1 (early) ──────────────────────────────────
+        {"start":s(150),  "end":s(550),  "origin":"T05","mode":"mechanical_wear",
+         "peak":0.88,"props":{"SW3":s(80),"T04":s(100),"T06":s(100),"BR2":s(120)}},
+        {"start":s(250),  "end":s(500),  "origin":"SW1","mode":"electrical_fault",
+         "peak":0.76,"props":{"T01":s(60),"T02":s(60),"SG1":s(100)}},
+        # ── Cluster 2 ─────────────────────────────────────────
+        {"start":s(700),  "end":s(1100), "origin":"BR2","mode":"overheating",
+         "peak":0.91,"props":{"T05":s(100),"T06":s(100),"SW3":s(150)}},
+        {"start":s(800),  "end":s(1050), "origin":"T08","mode":"mechanical_wear",
+         "peak":0.73,"props":{"T07":s(60),"T09":s(60),"SW4":s(80),"BR3":s(100)}},
+        {"start":s(900),  "end":s(1100), "origin":"SG2","mode":"electrical_fault",
+         "peak":0.71,"props":{"SW2":s(80),"SW3":s(80)}},
+        # ── Cluster 3 (heavy cascade) ──────────────────────────
+        {"start":s(1400), "end":s(1900), "origin":"T05","mode":"mechanical_wear",
+         "peak":0.96,"props":{"SW2":s(100),"SW3":s(100),"BR2":s(150),"T04":s(120),"T06":s(120)}},
+        {"start":s(1500), "end":s(1850), "origin":"BR1","mode":"overheating",
+         "peak":0.83,"props":{"T02":s(80),"T03":s(80),"SW1":s(120)}},
+        # ── Cluster 4 ─────────────────────────────────────────
+        {"start":s(2100), "end":s(2450), "origin":"SW4","mode":"electrical_fault",
+         "peak":0.79,"props":{"T07":s(80),"T08":s(80),"T09":s(80),"SG3":s(120)}},
+        {"start":s(2300), "end":s(2650), "origin":"T03","mode":"mechanical_wear",
+         "peak":0.69,"props":{"T02":s(80),"T04":s(80),"SW1":s(100),"SW2":s(100)}},
+        # ── Cluster 5 ─────────────────────────────────────────
+        {"start":s(2900), "end":s(3350), "origin":"BR3","mode":"overheating",
+         "peak":0.86,"props":{"T08":s(100),"T09":s(100),"SW4":s(120)}},
+        {"start":s(3050), "end":s(3450), "origin":"T01","mode":"mechanical_wear",
+         "peak":0.74,"props":{"T02":s(60),"SW1":s(80)}},
+        {"start":s(3150), "end":s(3550), "origin":"SG3","mode":"electrical_fault",
+         "peak":0.77,"props":{"SW3":s(80),"SW4":s(80)}},
+        # ── Cluster 6 (major finale) ───────────────────────────
+        {"start":s(3900), "end":s(4550), "origin":"T05","mode":"mechanical_wear",
+         "peak":0.97,"props":{"SW2":s(80),"SW3":s(80),"BR2":s(100),
+                              "T04":s(100),"T06":s(100),"SG2":s(150)}},
+        {"start":s(4000), "end":s(4450), "origin":"BR2","mode":"overheating",
+         "peak":0.94,"props":{"T05":s(60),"T06":s(60),"SW3":s(80)}},
+        {"start":s(4100), "end":s(4650), "origin":"SW1","mode":"electrical_fault",
+         "peak":0.81,"props":{"T01":s(80),"T02":s(80),"T03":s(100),"SG1":s(120)}},
+        # ── Late events ───────────────────────────────────────
+        {"start":s(4550), "end":s(4850), "origin":"T10","mode":"mechanical_wear",
+         "peak":0.72,"props":{"T09":s(80),"SW4":s(100)}},
+        {"start":s(4650), "end":s(4950), "origin":"SG1","mode":"electrical_fault",
+         "peak":0.75,"props":{"SW1":s(80),"SW2":s(80)}},
+    ]
+
+
+def _get_severity(cid: str, step: int, events: list) -> tuple:
+    best_sev, best_mode = 0.0, "normal"
+    for ev in events:
+        if step < ev["start"] or step > ev["end"]:
+            continue
+        dur     = ev["end"] - ev["start"]
+        if dur == 0: continue
+        elapsed = step - ev["start"]
+        if elapsed < dur * 0.3:
+            sev = ev["peak"] * (1 - math.exp(-4 * elapsed / max(1, dur * 0.3)))
+        elif elapsed > dur * 0.8:
+            sev = ev["peak"] * max(0.0, 1 - (elapsed - dur*0.8) / max(1, dur*0.2))
+        else:
+            sev = ev["peak"]
+
+        if cid == ev["origin"]:
+            if sev > best_sev:
+                best_sev  = sev
+                best_mode = ev["mode"]
+        elif cid in ev.get("props", {}):
+            delay      = ev["props"][cid]
+            prop_start = ev["start"] + delay
+            if step >= prop_start:
+                pe   = step - prop_start
+                prop = sev * 0.55 * (1 - math.exp(-3 * pe / max(1, dur - delay)))
+                if prop > best_sev:
+                    best_sev  = prop
+                    best_mode = ev["mode"] + "_propagated"
+    return best_sev, best_mode
+
+
+def _generate_row(cid: str, step: int, rid: int,
+                  prev: dict, events: list) -> dict:
+    ctype    = COMPONENT_TYPES[cid]
+    baseline = BASELINES[ctype]
+    sev, mode = _get_severity(cid, step, events)
+
+    readings, deltas = {}, {}
+    for s in SENSORS:
+        bm, bs = baseline[s]
+        if "mechanical_wear" in mode:
+            mult = {"vibration":1+sev*3.2,"temperature":1+sev*0.9,
+                    "load":1+sev*0.4,"current":1+sev*0.6}[s]
+        elif "overheating" in mode:
+            mult = {"vibration":1+sev*0.5,"temperature":1+sev*3.8,
+                    "load":1+sev*0.3,"current":1+sev*2.0}[s]
+        elif "electrical_fault" in mode:
+            mult = {"vibration":1+sev*0.4,"temperature":1+sev*1.0,
+                    "load":max(0.4, 1-sev*0.4),"current":1+sev*3.5}[s]
+        else:
+            mult = 1.0
+
+        drift = 0.02 * math.sin(step*0.01 + hash(cid+s) % 100)
+        noise = random.gauss(0, bs * (1 + sev * 0.6))
+        val   = max(0.0, bm * mult + noise + drift * bm)
+        readings[s] = round(val, 4)
+        deltas[s]   = round(val - prev.get(s, bm), 4)
+
+    # Risk score from degradation STATE + noise — not from sensor formula
+    risk_score   = round(min(1.0, max(0.0, sev + random.gauss(0, 0.04))), 4)
+    health_index = round(max(0.0, 1.0 - sev + random.gauss(0, 0.03)), 4)
+
+    if   risk_score >= THRESH_HIGH:   rl = "high"
+    elif risk_score >= THRESH_MEDIUM: rl = "medium"
+    elif risk_score >= THRESH_LOW:    rl = "low"
+    else:                             rl = "normal"
+
+    if   sev < 0.10: ds = "healthy"
+    elif sev < 0.30: ds = "early_wear"
+    elif sev < 0.60: ds = "moderate_wear"
+    elif sev < 0.80: ds = "severe_wear"
+    else:            ds = "critical"
+
+    return {
+        "record_id":         rid,
+        "time_step":         step,
+        "component_id":      cid,
+        "component_type":    ctype,
+        "vibration":         readings["vibration"],
+        "temperature":       readings["temperature"],
+        "load":              readings["load"],
+        "current":           readings["current"],
+        "vibration_delta":   deltas["vibration"],
+        "temperature_delta": deltas["temperature"],
+        "risk_score":        risk_score,
+        "health_index":      health_index,
+        "risk_level":        rl,
+        "failure_mode":      mode,
+        "is_anomaly":        risk_score >= THRESH_MEDIUM,
+        "is_degrading":      risk_score >= THRESH_LOW,
+        "degradation_state": ds,
+    }
+
+
+def generate(n_steps: int = 20000,
+             out_path: str = "data/raw/railway_sensor_data.csv"):
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    events = _make_events(n_steps)
+    rid    = 0
+    prev   = {c: {"vibration":0.35,"temperature":42.0,
+                  "load":65.0,"current":14.5}
+              for c in COMPONENT_ORDER}
+    counts = {"normal":0,"low":0,"medium":0,"high":0,"medium":0}
+    counts = {k:0 for k in ["normal","low","medium","high"]}
+
+    n_comps = len(COMPONENT_ORDER)
+    total   = n_steps * n_comps
+
+    print(f"\n{'='*60}")
+    print(f"  PHASE 1 — SENSOR DATA GENERATION")
+    print(f"{'='*60}")
+    print(f"  Components    : {n_comps}")
+    print(f"  Time steps    : {n_steps:,}")
+    print(f"  Total records : {total:,}")
+    print(f"  Failure events: {len(events)}")
+    print(f"  Output        : {out_path}")
+    print(f"{'='*60}\n")
+
+    with open(out_path, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=FIELDNAMES)
+        writer.writeheader()
+        for step in range(n_steps):
+            for cid in COMPONENT_ORDER:
+                row = _generate_row(cid, step, rid, prev[cid], events)
+                writer.writerow(row)
+                prev[cid] = {s: row[s] for s in SENSORS}
+                counts[row["risk_level"]] += 1
+                rid += 1
+            if step % 2000 == 0 and step > 0:
+                done = rid / total * 100
+                print(f"  step {step:>6,}/{n_steps}  records={rid:,}  ({done:.0f}%)")
+
+    print(f"\n  ✅ Done — {rid:,} records written to {out_path}")
+    print(f"\n  Label distribution:")
+    for k, v in counts.items():
+        bar = "█" * int(v / rid * 50)
+        print(f"    {k:8s}: {v:8,}  ({v/rid*100:5.1f}%)  {bar}")
 
 
 def main():
-    """Main function to generate the dataset"""
-    output_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "raw")
-    os.makedirs(output_dir, exist_ok=True)
-    
-    output_path = os.path.join(output_dir, "railway_sensor_data.csv")
-    
-    simulator = RailwaySensorSimulator()
-    df = simulator.generate_dataset(output_path=output_path)
-    simulator.print_summary(df)
-    
-    summary = simulator.generate_summary(df)
-    summary_path = os.path.join(output_dir, "dataset_summary.json")
-    
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    
-    print(f"\nSummary saved to: {summary_path}")
-    
-    return df
+    parser = argparse.ArgumentParser(description="Phase 1 — Sensor Data Generator")
+    parser.add_argument("--steps", type=int, default=20000,
+                        help="Number of time steps (default: 20000 → 400K records)")
+    parser.add_argument("--out",   default="data/raw/railway_sensor_data.csv")
+    args = parser.parse_args()
+    generate(args.steps, args.out)
 
 
 if __name__ == "__main__":

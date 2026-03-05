@@ -1,7 +1,7 @@
 {
   "records_processed": 10000,
-  "elapsed_seconds": 0.42,
-  "throughput_rec_per_sec": 24032.6,
+  "elapsed_seconds": 0.44,
+  "throughput_rec_per_sec": 22655.4,
   "components_tracked": 20,
   "component_ids": [
     "BR1",

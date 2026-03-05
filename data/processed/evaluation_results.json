@@ -1,0 +1,222 @@
+{
+  "overall": {
+    "accuracy": 0.5302,
+    "auc_roc": 0.8359,
+    "mae": 0.1086,
+    "rmse": 0.19013,
+    "total_samples": 500,
+    "total_nodes": 20
+  },
+  "per_class": {
+    "normal": {
+      "precision": 0.9274,
+      "recall": 0.5953,
+      "f1": 0.7251
+    },
+    "low": {
+      "precision": 0.1733,
+      "recall": 0.5877,
+      "f1": 0.2677
+    },
+    "medium": {
+      "precision": 0.7829,
+      "recall": 0.1102,
+      "f1": 0.1932
+    },
+    "high": {
+      "precision": 0.3188,
+      "recall": 0.5399,
+      "f1": 0.4009
+    }
+  },
+  "confusion_matrix": [
+    [
+      4049,
+      2717,
+      9,
+      27
+    ],
+    [
+      140,
+      744,
+      4,
+      378
+    ],
+    [
+      65,
+      651,
+      137,
+      390
+    ],
+    [
+      112,
+      180,
+      25,
+      372
+    ]
+  ],
+  "per_node": {
+    "T01": {
+      "accuracy": 0.27,
+      "reg_mae": 0.12313
+    },
+    "T02": {
+      "accuracy": 0.554,
+      "reg_mae": 0.05127
+    },
+    "T03": {
+      "accuracy": 0.618,
+      "reg_mae": 0.06989
+    },
+    "T04": {
+      "accuracy": 0.322,
+      "reg_mae": 0.1177
+    },
+    "T05": {
+      "accuracy": 0.652,
+      "reg_mae": 0.26442
+    },
+    "T06": {
+      "accuracy": 0.814,
+      "reg_mae": 0.09949
+    },
+    "T07": {
+      "accuracy": 0.66,
+      "reg_mae": 0.02658
+    },
+    "T08": {
+      "accuracy": 0.998,
+      "reg_mae": 0.01782
+    },
+    "T09": {
+      "accuracy": 0.8,
+      "reg_mae": 0.07083
+    },
+    "T10": {
+      "accuracy": 0.628,
+      "reg_mae": 0.24337
+    },
+    "SW1": {
+      "accuracy": 0.68,
+      "reg_mae": 0.13991
+    },
+    "SW2": {
+      "accuracy": 0.364,
+      "reg_mae": 0.07989
+    },
+    "SW3": {
+      "accuracy": 0.116,
+      "reg_mae": 0.10225
+    },
+    "SW4": {
+      "accuracy": 0.486,
+      "reg_mae": 0.06755
+    },
+    "SG1": {
+      "accuracy": 0.224,
+      "reg_mae": 0.26321
+    },
+    "SG2": {
+      "accuracy": 0.08,
+      "reg_mae": 0.11811
+    },
+    "SG3": {
+      "accuracy": 0.0,
+      "reg_mae": 0.05742
+    },
+    "BR1": {
+      "accuracy": 0.514,
+      "reg_mae": 0.07563
+    },
+    "BR2": {
+      "accuracy": 0.824,
+      "reg_mae": 0.16552
+    },
+    "BR3": {
+      "accuracy": 1.0,
+      "reg_mae": 0.01795
+    }
+  },
+  "root_cause_ranking": [
+    {
+      "component": "T10",
+      "score": 0.11227
+    },
+    {
+      "component": "BR3",
+      "score": 0.08848
+    },
+    {
+      "component": "BR2",
+      "score": 0.05968
+    },
+    {
+      "component": "SW4",
+      "score": 0.05824
+    },
+    {
+      "component": "BR1",
+      "score": 0.05399
+    },
+    {
+      "component": "T08",
+      "score": 0.05326
+    },
+    {
+      "component": "T09",
+      "score": 0.05266
+    },
+    {
+      "component": "T07",
+      "score": 0.04858
+    },
+    {
+      "component": "T04",
+      "score": 0.04462
+    },
+    {
+      "component": "T03",
+      "score": 0.04377
+    },
+    {
+      "component": "T06",
+      "score": 0.04329
+    },
+    {
+      "component": "T01",
+      "score": 0.04268
+    },
+    {
+      "component": "T05",
+      "score": 0.0425
+    },
+    {
+      "component": "T02",
+      "score": 0.04137
+    },
+    {
+      "component": "SW3",
+      "score": 0.0408
+    },
+    {
+      "component": "SG3",
+      "score": 0.03901
+    },
+    {
+      "component": "SW1",
+      "score": 0.03727
+    },
+    {
+      "component": "SW2",
+      "score": 0.03638
+    },
+    {
+      "component": "SG2",
+      "score": 0.03373
+    },
+    {
+      "component": "SG1",
+      "score": 0.02741
+    }
+  ]
+}

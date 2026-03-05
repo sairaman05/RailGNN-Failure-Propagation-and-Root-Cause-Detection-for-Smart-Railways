@@ -1,40 +1,40 @@
 """
-Kafka Producer for Railway Sensor Data
-Streams records from the generated CSV as if they were live sensors.
+Phase 3 (updated) — Kafka Producer with Folder Watcher
+
+Two modes:
+  1. watch  — monitors data/incoming/ for new CSV files, streams them automatically
+  2. stream — manually stream a specific CSV file (original behaviour)
+
+Usage:
+  python -m src.kafka.producer --mode watch --folder data/incoming/
+  python -m src.kafka.producer --mode stream --csv data/raw/railway_sensor_data.csv
 """
 
+import csv
 import json
 import time
-import csv
+import os
 import argparse
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 
 try:
     from kafka import KafkaProducer
-    from kafka.errors import KafkaError, NoBrokersAvailable
+    from kafka.errors import NoBrokersAvailable
     KAFKA_AVAILABLE = True
 except ImportError:
     KAFKA_AVAILABLE = False
 
-from src.kafka.config import (
-    KAFKA_BOOTSTRAP_SERVERS, TOPICS, PRODUCER_CONFIG, STREAM_CONFIG
-)
+from src.kafka.config import KAFKA_BOOTSTRAP_SERVERS, TOPICS, STREAM_CONFIG
 
 
 class RailwaySensorProducer:
-    """
-    Reads railway_sensor_data.csv and publishes records to Kafka.
-    Simulates a real-time feed at configurable speed.
-    """
 
-    def __init__(self, bootstrap_servers: str = KAFKA_BOOTSTRAP_SERVERS,
-                 simulation_speed_ms: int = None):
+    def __init__(self, bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS):
         self.bootstrap_servers = bootstrap_servers
-        self.topic = TOPICS["raw_sensors"]
-        self.speed_ms = simulation_speed_ms or STREAM_CONFIG["simulation_speed_ms"]
+        self.topic    = TOPICS["raw_sensors"]
         self.producer = None
-        self._stats = {"sent": 0, "errors": 0, "start_time": None}
+        self._stats   = {"sent": 0, "errors": 0, "files_processed": 0}
 
     # ------------------------------------------------------------------
     # Connection
@@ -42,182 +42,149 @@ class RailwaySensorProducer:
 
     def connect(self) -> bool:
         if not KAFKA_AVAILABLE:
-            print("[Producer] kafka-python not installed. Run: pip install kafka-python")
+            print("[Producer] kafka-python not installed: pip install kafka-python")
             return False
         try:
             self.producer = KafkaProducer(
                 bootstrap_servers=self.bootstrap_servers,
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
                 key_serializer=lambda k: k.encode("utf-8") if k else None,
-                acks="all",
-                retries=3,
-                batch_size=16384,
-                linger_ms=10,
-                compression_type="gzip",
+                acks="all", retries=3, linger_ms=10, compression_type="gzip",
             )
-            print(f"[Producer] Connected to Kafka at {self.bootstrap_servers}")
+            print(f"[Producer] Connected → {self.bootstrap_servers}")
             return True
         except NoBrokersAvailable:
-            print(f"[Producer] ERROR: No Kafka broker at {self.bootstrap_servers}")
-            print("           Start Kafka first (see docker-compose.yml).")
-            return False
-        except Exception as exc:
-            print(f"[Producer] ERROR connecting: {exc}")
+            print(f"[Producer] No broker at {self.bootstrap_servers}. Start Kafka first.")
             return False
 
     def disconnect(self):
         if self.producer:
             self.producer.flush()
             self.producer.close()
-            print("[Producer] Disconnected.")
+        print(f"[Producer] Done. Sent {self._stats['sent']:,} records "
+              f"from {self._stats['files_processed']} file(s).")
 
     # ------------------------------------------------------------------
-    # Sending helpers
+    # Mode 1: Folder Watcher
     # ------------------------------------------------------------------
 
-    def _on_send_success(self, record_metadata):
-        self._stats["sent"] += 1
-
-    def _on_send_error(self, exc):
-        self._stats["errors"] += 1
-        print(f"[Producer] Send error: {exc}")
-
-    def send_record(self, record: dict):
-        """Send a single sensor record. Key = component_id for partitioning."""
-        key = record.get("component_id", "unknown")
-        self.producer.send(self.topic, key=key, value=record) \
-            .add_callback(self._on_send_success) \
-            .add_errback(self._on_send_error)
-
-    # ------------------------------------------------------------------
-    # Main streaming loop
-    # ------------------------------------------------------------------
-
-    def stream_from_csv(self, csv_path: str, limit: int = None,
-                        speed_ms: int = None, verbose_every: int = 1000):
+    def watch_folder(self, folder: str = "data/incoming",
+                     poll_interval: int = 10,
+                     speed_ms: int = 50):
         """
-        Stream records from csv_path to Kafka.
-
-        Args:
-            csv_path:      Path to railway_sensor_data.csv
-            limit:         Stop after N records (None = all)
-            speed_ms:      Override simulation speed
-            verbose_every: Print progress every N records
+        Watch a folder. When a new CSV appears:
+          1. Stream all its records to Kafka
+          2. Move the file to data/processed_incoming/ so it's not re-sent
         """
-        path = Path(csv_path)
-        if not path.exists():
-            raise FileNotFoundError(f"CSV not found: {csv_path}")
+        watch_dir    = Path(folder)
+        done_dir     = Path("data/processed_incoming")
+        watch_dir.mkdir(parents=True, exist_ok=True)
+        done_dir.mkdir(parents=True, exist_ok=True)
 
-        delay = (speed_ms or self.speed_ms) / 1000.0
-        self._stats["start_time"] = time.time()
+        seen = set()
 
-        print(f"\n[Producer] Streaming from: {csv_path}")
-        print(f"[Producer] Topic: {self.topic}")
-        print(f"[Producer] Speed: {speed_ms or self.speed_ms} ms / record")
-        print(f"[Producer] Limit: {limit or 'all'}")
-        print("-" * 60)
+        print(f"\n[Producer] 👁  Watching folder: {watch_dir.resolve()}")
+        print(f"[Producer]    Drop any CSV file there to trigger live inference.")
+        print(f"[Producer]    Poll interval: {poll_interval}s")
+        print(f"[Producer]    Press Ctrl-C to stop.\n")
 
-        count = 0
         try:
-            with open(path, "r") as fh:
-                reader = csv.DictReader(fh)
-                for row in reader:
-                    if limit and count >= limit:
-                        break
-
-                    record = self._parse_row(row)
-                    self.send_record(record)
-                    count += 1
-
-                    if count % verbose_every == 0:
-                        elapsed = time.time() - self._stats["start_time"]
-                        rate = count / elapsed
-                        print(f"  Sent: {count:,}  |  Errors: {self._stats['errors']}  "
-                              f"|  Rate: {rate:.0f} rec/s  |  Elapsed: {elapsed:.1f}s")
-
-                    if delay > 0:
-                        time.sleep(delay)
-
+            while True:
+                csv_files = sorted(watch_dir.glob("*.csv"))
+                for f in csv_files:
+                    if f.name not in seen:
+                        seen.add(f.name)
+                        print(f"[Producer] 📂 New file detected: {f.name}")
+                        count = self._stream_file(f, speed_ms=speed_ms)
+                        # Move to done folder
+                        dest = done_dir / f.name
+                        f.rename(dest)
+                        print(f"[Producer] ✅ Streamed {count:,} records. "
+                              f"File moved → {dest}")
+                time.sleep(poll_interval)
         except KeyboardInterrupt:
-            print("\n[Producer] Interrupted by user.")
-        finally:
-            if self.producer:
-                self.producer.flush()
-            elapsed = time.time() - self._stats["start_time"]
-            print(f"\n[Producer] Done. Sent {self._stats['sent']:,} records in {elapsed:.1f}s.")
-            print(f"[Producer] Errors: {self._stats['errors']}")
+            print("\n[Producer] Watcher stopped.")
 
     # ------------------------------------------------------------------
-    # Utilities
+    # Mode 2: Stream a specific file
     # ------------------------------------------------------------------
+
+    def stream_file(self, csv_path: str, speed_ms: int = 50):
+        p = Path(csv_path)
+        if not p.exists():
+            print(f"[Producer] File not found: {csv_path}")
+            return
+        count = self._stream_file(p, speed_ms=speed_ms)
+        print(f"[Producer] Streamed {count:,} records from {csv_path}")
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _stream_file(self, path: Path, speed_ms: int = 50) -> int:
+        delay = speed_ms / 1000.0
+        count = 0
+        start = time.time()
+
+        with open(path) as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                record = self._parse_row(row)
+                record["source_file"] = path.name
+                cid = record.get("component_id", "unknown")
+                self.producer.send(self.topic, key=cid, value=record) \
+                    .add_errback(lambda e: self._stats.update({"errors": self._stats["errors"]+1}))
+                count += 1
+                if delay > 0:
+                    time.sleep(delay)
+
+        self.producer.flush()
+        self._stats["sent"]            += count
+        self._stats["files_processed"] += 1
+        elapsed = time.time() - start
+        print(f"[Producer]   {path.name}: {count:,} records in {elapsed:.1f}s "
+              f"({count/elapsed:.0f} rec/s)")
+        return count
 
     @staticmethod
     def _parse_row(row: dict) -> dict:
-        """Convert CSV string values to proper Python types."""
-        float_cols = ["vibration", "temperature", "load", "current",
-                      "risk_score", "health_index"]
-        int_cols   = ["record_id", "time_step"]
-        bool_cols  = ["is_anomaly", "is_degrading"]
-
+        float_cols = ["vibration","temperature","load","current","risk_score","health_index"]
+        int_cols   = ["record_id","time_step"]
+        bool_cols  = ["is_anomaly","is_degrading"]
         parsed = dict(row)
-        for col in float_cols:
-            if col in parsed:
-                try:
-                    parsed[col] = float(parsed[col])
-                except (ValueError, TypeError):
-                    parsed[col] = 0.0
-        for col in int_cols:
-            if col in parsed:
-                try:
-                    parsed[col] = int(parsed[col])
-                except (ValueError, TypeError):
-                    parsed[col] = 0
-        for col in bool_cols:
-            if col in parsed:
-                parsed[col] = str(parsed[col]).lower() in ("true", "1", "yes")
-
-        # Add producer timestamp
+        for c in float_cols:
+            try:    parsed[c] = float(parsed[c])
+            except: parsed[c] = 0.0
+        for c in int_cols:
+            try:    parsed[c] = int(parsed[c])
+            except: parsed[c] = 0
+        for c in bool_cols:
+            parsed[c] = str(parsed.get(c,"")).lower() in ("true","1","yes")
         parsed["produced_at"] = datetime.utcnow().isoformat()
         return parsed
 
-    def print_stats(self):
-        elapsed = time.time() - (self._stats["start_time"] or time.time())
-        print(f"\n--- Producer Stats ---")
-        print(f"  Records sent : {self._stats['sent']:,}")
-        print(f"  Errors       : {self._stats['errors']}")
-        print(f"  Elapsed      : {elapsed:.1f}s")
-        if elapsed > 0:
-            print(f"  Rate         : {self._stats['sent'] / elapsed:.0f} rec/s")
-
-
-# ------------------------------------------------------------------
-# CLI entry point
-# ------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Railway Sensor Kafka Producer")
-    parser.add_argument("--csv",   default="data/raw/railway_sensor_data.csv",
-                        help="Path to sensor CSV")
-    parser.add_argument("--limit", type=int, default=None,
-                        help="Max records to send (default: all)")
-    parser.add_argument("--speed", type=int, default=50,
-                        help="ms between records (default: 50, 0=max speed)")
-    parser.add_argument("--brokers", default=KAFKA_BOOTSTRAP_SERVERS,
-                        help="Kafka bootstrap servers")
+    parser = argparse.ArgumentParser(description="Railway Kafka Producer")
+    parser.add_argument("--mode",     default="watch", choices=["watch","stream"])
+    parser.add_argument("--folder",   default="data/incoming")
+    parser.add_argument("--csv",      default="data/raw/railway_sensor_data.csv")
+    parser.add_argument("--speed",    type=int, default=50)
+    parser.add_argument("--interval", type=int, default=10,
+                        help="Folder poll interval in seconds")
+    parser.add_argument("--brokers",  default=KAFKA_BOOTSTRAP_SERVERS)
     args = parser.parse_args()
 
-    producer = RailwaySensorProducer(
-        bootstrap_servers=args.brokers,
-        simulation_speed_ms=args.speed
-    )
-
-    if not producer.connect():
+    p = RailwaySensorProducer(bootstrap_servers=args.brokers)
+    if not p.connect():
         return
-
     try:
-        producer.stream_from_csv(args.csv, limit=args.limit, speed_ms=args.speed)
+        if args.mode == "watch":
+            p.watch_folder(args.folder, poll_interval=args.interval, speed_ms=args.speed)
+        else:
+            p.stream_file(args.csv, speed_ms=args.speed)
     finally:
-        producer.disconnect()
+        p.disconnect()
 
 
 if __name__ == "__main__":
